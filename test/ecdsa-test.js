@@ -653,4 +653,109 @@ describe('ECDSA', function() {
       assert(!verifies(ecdsa, found.msg, forged, keys));
     });
   });
+
+  describe('CVE-2025-14505 nonce leading-zero bias', function() {
+    it('P-521 signature must match Python cryptography reference vector', function() {
+      var crypto = require('crypto');
+      var ec = new elliptic.ec('p521');
+      var key = ec.keyFromPrivate(
+        '01535d22d63de9195efd4c41358ddc89c68b6cc202b558fbf48a09e95d' +
+        'ddf953afc1b4cfed6df0f3330f986735085e367fd07030c3ab49dcd346' +
+        '1197b00f09a064fb',
+        'hex'
+      );
+      var msg = Buffer.from('12f830e9591916ec', 'hex');
+      var msgHash = crypto.createHash('sha512').update(msg).digest();
+      var sig = key.sign(msgHash);
+      assert.equal(
+        sig.r.toString(16),
+        '1e92eeaf15414d4af3ee933825131867b6cb10234f28336ac976a9912713' +
+        '9f23100458a9ee7184bfa64540ba385331eb3b469f491b3da013c42ad154' +
+        'a5907f554f0'
+      );
+      assert.equal(
+        sig.s.toString(16),
+        'db3703c6d51b8a85c10c21b7643fe751781a7ad5708e3a944107f6da086a' +
+        'fdc8532765871a9cabc81cec0f5b28ee59f0c72b48b72a39ae2d230dfb03' +
+        'afb9968a94'
+      );
+    });
+  });
+
+  describe('GHSA-vjh7-7g9h-fjfh message input checks', function() {
+    var ec = new elliptic.ec('secp256k1');
+    var key = ec.keyFromPrivate(
+      'c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721'
+    );
+
+    it('should reject non-byte array elements', function() {
+      assert.throws(function() {
+        key.sign([ 1, 2, 256 ]);
+      });
+    });
+
+    it('should reject non array-like objects', function() {
+      assert.throws(function() {
+        key.sign({ foo: 'bar' });
+      });
+    });
+
+    it('should reject negative messages', function() {
+      assert.throws(function() {
+        key.sign(new BN(-1));
+      });
+    });
+
+    it('should still sign byte arrays', function() {
+      var msg = [ 0x00, 0x01, 0x02, 0x03 ];
+      var sig = key.sign(msg);
+      assert(key.verify(msg, sig));
+    });
+
+    // Two signatures sharing a nonce `k` reveal the private key:
+    //   k = (z1 - z2) / (s1 - s2), d = (s1 * k - z1) / r  (mod n)
+    function recoverPrivate(z1, sig1, z2, sig2) {
+      var n = ec.n;
+      var k = z1.sub(z2).umod(n)
+        .mul(sig1.s.sub(sig2.s).umod(n).invm(n)).umod(n);
+      return sig1.s.mul(k).sub(z1).umod(n)
+        .mul(sig1.r.invm(n)).umod(n);
+    }
+
+    // Sign a known message, then try to get a malicious variant of it
+    // signed. A negated message used to reuse the known message's nonce.
+    function assertNoKeyLeak(known, value, malicious) {
+      var sig1 = key.sign(known);
+      var sig2 = null;
+      try {
+        sig2 = key.sign(malicious);
+      } catch (e) {
+        sig2 = null;
+      }
+      if (sig2 !== null) {
+        var z1 = value.umod(ec.n);
+        var z2 = value.neg().umod(ec.n);
+        var leaked = sig1.r.eq(sig2.r) &&
+          recoverPrivate(z1, sig1, z2, sig2).eq(key.getPrivate());
+        assert(!leaked, 'Private key leaked through nonce reuse');
+      }
+      assert.strictEqual(sig2, null, 'Negative message must be rejected');
+    }
+
+    it('should not leak the private key via a negated hex message', function() {
+      // 31 bytes, so the '-' prefix keeps the hex within the curve size
+      var known = new Array(32).join('01');
+      assertNoKeyLeak(known, new BN(known, 16), '-' + known);
+    });
+
+    it('should not leak the private key via a negated BN message', function() {
+      var known = new Array(33).join('01');
+      var value = new BN(known, 16);
+      assertNoKeyLeak(known, value, value.neg());
+    });
+
+    it('should not leak the private key via a negative number', function() {
+      assertNoKeyLeak(0x1234, new BN(0x1234), -0x1234);
+    });
+  });
 });
