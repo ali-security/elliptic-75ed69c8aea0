@@ -111,6 +111,70 @@ describe('EDDSA(\'ed25519\')', function() {
     assert(key.verify(msg, sig));
   });
 
+  it('rejects signatures with invalid size', function() {
+    var secret = toArray(new Array(65).join('0'), 'hex');
+    var msg = [ 0xB, 0xE, 0xE, 0xF ];
+    var key = ed25519.keyFromSecret(secret);
+    var sig = key.sign(msg).toHex();
+    assert(key.verify(msg, sig));
+
+    function verifies(s) {
+      try {
+        return key.verify(msg, s);
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // Trailing zero octet does not change little-endian S
+    var padded = sig + '00';
+    assert.throws(function() {
+      ed25519.makeSignature(padded);
+    }, /Signature has invalid size/);
+    assert(!verifies(padded));
+    assert(!verifies(toArray(padded, 'hex')));
+
+    var truncated = sig.slice(0, 126);
+    assert.throws(function() {
+      ed25519.makeSignature(truncated);
+    }, /Signature has invalid size/);
+    assert(!verifies(truncated));
+  });
+
+  it('rejects signatures with a stripped zero octet', function() {
+    var secret = toArray(new Array(65).join('0'), 'hex');
+    var key = ed25519.keyFromSecret(secret);
+
+    function verifies(m, s) {
+      try {
+        return key.verify(m, s);
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // Find a signature whose most significant S octet is zero
+    var msg;
+    var sig;
+    for (var i = 0; i < 256; i++) {
+      msg = [ 0xB, 0xE, 0xE, 0xF, i ];
+      sig = key.sign(msg).toBytes();
+      if (sig[sig.length - 1] === 0)
+        break;
+    }
+    assert.equal(sig.length, 64);
+    assert.equal(sig[sig.length - 1], 0);
+    assert(key.verify(msg, sig));
+
+    // Dropping it does not change little-endian S
+    var stripped = sig.slice(0, sig.length - 1);
+    assert.throws(function() {
+      ed25519.makeSignature(stripped);
+    }, /Signature has invalid size/);
+    assert(!verifies(msg, stripped));
+    assert(!verifies(msg, toHex(stripped)));
+  });
+
   describe('KeyPair', function() {
     var pair;
     var secret = '00000000000000000000000000000000' +
